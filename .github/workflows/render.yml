@@ -33,7 +33,7 @@ on:
 
 jobs:
   plan:
-    name: Plan chunk matrix
+    name: Plan + cache project tarball
     runs-on: ubuntu-latest
     outputs:
       chunks: ${{ steps.chunks.outputs.chunks }}
@@ -45,11 +45,24 @@ jobs:
           TOTAL=${{ inputs.total_frames }}
           SIZE=${{ inputs.chunk_size }}
           NCHUNKS=$(( (TOTAL + SIZE - 1) / SIZE ))
-          # GitHub Actions max 256 matrix jobs; our films are well under that
           CHUNKS=$(python3 -c "import json; print(json.dumps(list(range($NCHUNKS))))")
           echo "chunks=$CHUNKS" >> $GITHUB_OUTPUT
           echo "chunk_size=$SIZE" >> $GITHUB_OUTPUT
           echo "planned $NCHUNKS chunks of $SIZE frames each"
+
+      - name: Pull project tarball from Inkrender (ONE time)
+        run: |
+          echo "Downloading from user's server..."
+          time curl -fL --retry 3 --retry-delay 5 -o assets.tar.gz "${{ inputs.assets_url }}"
+          ls -lh assets.tar.gz
+
+      - name: Cache tarball as artifact (zero-compression — GH-internal transfer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: project-tarball
+          path: assets.tar.gz
+          retention-days: 1
+          compression-level: 0  # already gzipped, don't double-compress
 
   render:
     name: Render chunk ${{ matrix.chunk }}
@@ -69,11 +82,15 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Download project assets
+      - name: Pull cached tarball from GH (gigabit, seconds)
+        uses: actions/download-artifact@v4
+        with:
+          name: project-tarball
+
+      - name: Extract
         run: |
-          curl -fL -o assets.tar.gz "${{ inputs.assets_url }}"
-          tar -xzf assets.tar.gz
-          # Expect film/, components/, core/, film/public/, package.json, package-lock.json
+          time tar -xzf assets.tar.gz
+          ls -la | head -20
 
       - name: Install project deps
         run: |
@@ -101,12 +118,13 @@ jobs:
           [ $B -gt $LAST ] && B=$LAST
           mkdir -p chunks
           OUT=$(printf "chunks/%04d.mp4" $CHUNK)
+          # Standard GH Linux runner = 4 vCPU; concurrency 4 saturates cores
           npx remotion render build "${{ inputs.composition_id }}" "$OUT" \
             --frames=$A-$B \
             --codec h264 \
             --video-bitrate "${{ inputs.video_bitrate }}" \
             --audio-bitrate 128K \
-            --concurrency 3 \
+            --concurrency 4 \
             --timeout 180000 \
             --public-dir film/public
 
