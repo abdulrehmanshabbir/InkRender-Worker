@@ -69,18 +69,20 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Remotion deps
-        run: npm ci --no-audit --loglevel=error
-
       - name: Download project assets
         run: |
           curl -fL -o assets.tar.gz "${{ inputs.assets_url }}"
           tar -xzf assets.tar.gz
-          # Expect film/, components/, core/, film/public/
+          # Expect film/, components/, core/, film/public/, package.json, package-lock.json
 
-      - name: Install any extra project deps
+      - name: Install project deps
         run: |
-          if [ -f package.json ]; then npm ci --no-audit --loglevel=error || true; fi
+          if [ ! -f package.json ]; then echo "::error::project tarball missing package.json"; exit 1; fi
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --loglevel=error
+          else
+            npm install --no-audit --loglevel=error --no-package-lock
+          fi
 
       - name: Bundle
         run: |
