@@ -1,0 +1,165 @@
+name: Render
+
+on:
+  workflow_dispatch:
+    inputs:
+      composition_id:
+        description: "Remotion composition id (e.g. Russia-Full)"
+        required: true
+        type: string
+      total_frames:
+        description: "Total frames in the composition"
+        required: true
+        type: number
+      chunk_size:
+        description: "Frames per chunk"
+        required: false
+        type: number
+        default: 900
+      assets_url:
+        description: "Signed URL to tarball with components/ core/ film/ film/public/"
+        required: true
+        type: string
+      callback_url:
+        description: "Inkrender backend endpoint for progress pings (optional)"
+        required: false
+        type: string
+        default: ""
+      video_bitrate:
+        description: "Target video bitrate (e.g. 650K)"
+        required: false
+        type: string
+        default: "650K"
+
+jobs:
+  plan:
+    name: Plan chunk matrix
+    runs-on: ubuntu-latest
+    outputs:
+      chunks: ${{ steps.chunks.outputs.chunks }}
+      chunk_size: ${{ steps.chunks.outputs.chunk_size }}
+    steps:
+      - name: Compute chunk list
+        id: chunks
+        run: |
+          TOTAL=${{ inputs.total_frames }}
+          SIZE=${{ inputs.chunk_size }}
+          NCHUNKS=$(( (TOTAL + SIZE - 1) / SIZE ))
+          # GitHub Actions max 256 matrix jobs; our films are well under that
+          CHUNKS=$(python3 -c "import json; print(json.dumps(list(range($NCHUNKS))))")
+          echo "chunks=$CHUNKS" >> $GITHUB_OUTPUT
+          echo "chunk_size=$SIZE" >> $GITHUB_OUTPUT
+          echo "planned $NCHUNKS chunks of $SIZE frames each"
+
+  render:
+    name: Render chunk ${{ matrix.chunk }}
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 20   # free plan concurrency cap
+      matrix:
+        chunk: ${{ fromJSON(needs.plan.outputs.chunks) }}
+    steps:
+      - name: Checkout worker scaffold
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Remotion deps
+        run: npm ci --no-audit --loglevel=error
+
+      - name: Download project assets
+        run: |
+          curl -fL -o assets.tar.gz "${{ inputs.assets_url }}"
+          tar -xzf assets.tar.gz
+          # Expect film/, components/, core/, film/public/
+
+      - name: Install any extra project deps
+        run: |
+          if [ -f package.json ]; then npm ci --no-audit --loglevel=error || true; fi
+
+      - name: Bundle
+        run: |
+          mkdir -p .render-tmp build
+          export TMPDIR=$PWD/.render-tmp
+          npx remotion bundle film/index.ts --public-dir film/public --out-dir build
+
+      - name: Render chunk ${{ matrix.chunk }}
+        run: |
+          export TMPDIR=$PWD/.render-tmp
+          CHUNK=${{ matrix.chunk }}
+          SIZE=${{ needs.plan.outputs.chunk_size }}
+          LAST=$(( ${{ inputs.total_frames }} - 1 ))
+          A=$(( CHUNK * SIZE ))
+          B=$(( A + SIZE - 1 ))
+          [ $B -gt $LAST ] && B=$LAST
+          mkdir -p chunks
+          OUT=$(printf "chunks/%04d.mp4" $CHUNK)
+          npx remotion render build "${{ inputs.composition_id }}" "$OUT" \
+            --frames=$A-$B \
+            --codec h264 \
+            --video-bitrate "${{ inputs.video_bitrate }}" \
+            --audio-bitrate 128K \
+            --concurrency 3 \
+            --timeout 180000 \
+            --public-dir film/public
+
+      - name: Upload chunk artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: chunks/*.mp4
+          retention-days: 1
+
+      - name: Ping progress (optional)
+        if: inputs.callback_url != ''
+        run: |
+          curl -s -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"run_id\":\"${{ github.run_id }}\",\"chunk\":${{ matrix.chunk }},\"status\":\"done\"}" || true
+
+  concat:
+    name: Concat final MP4
+    needs: [plan, render]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          path: chunks-raw
+          merge-multiple: true
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Concat with -c copy
+        run: |
+          mkdir -p out chunks
+          # flatten into chunks/ with 4-digit names
+          find chunks-raw -name '*.mp4' | sort | while read f; do
+            name=$(basename $f)
+            cp "$f" "chunks/$name"
+          done
+          : > concat.txt
+          ls chunks/*.mp4 | sort | while read f; do echo "file '$PWD/$f'" >> concat.txt; done
+          ffmpeg -y -f concat -safe 0 -i concat.txt -c copy out/final.mp4
+          ls -lh out/final.mp4
+
+      - name: Upload final MP4
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-video
+          path: out/final.mp4
+          retention-days: 7
+
+      - name: Ping done (optional)
+        if: inputs.callback_url != ''
+        run: |
+          curl -s -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"run_id\":\"${{ github.run_id }}\",\"status\":\"complete\"}" || true

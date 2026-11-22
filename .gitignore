@@ -1,0 +1,9 @@
+node_modules/
+build/
+film/public/
+film/*.json
+chunks/
+out/
+.render-tmp/
+.DS_Store
+*.log
