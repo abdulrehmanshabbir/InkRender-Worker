@@ -14,8 +14,7 @@ oidc() {
 api() {
   local method=$1 path=$2 token
   shift 2
-  token=$(oidc)
-  echo "::add-mask::$token"
+  token=$(oidc)  # never printed; nothing may be echoed here, callers parse this function's output
   curl -sSf --retry 5 --retry-all-errors --retry-delay 4 --max-time 3600 -X "$method" \
     -H "Authorization: Bearer $token" "$@" "$API/api/worker/$JOB$path"
 }
