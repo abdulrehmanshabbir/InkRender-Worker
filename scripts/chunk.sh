@@ -12,7 +12,8 @@ node render.mjs setup
 echo "::endgroup::"
 
 progress "{\"chunk\":\"$CHUNK\",\"state\":\"rendering\",\"pct\":0}"
-node render.mjs render --chunks "$CHUNK" --concurrency "${CONCURRENCY:-4}" > render.log 2>&1 &
+# Segmented, self-healing render: fresh browser per segment, 3-minute frame limit, per-segment retries
+node "$GITHUB_WORKSPACE/scripts/render-chunk.mjs" "$PWD" "$CHUNK" --concurrency "${CONCURRENCY:-4}" > render.log 2>&1 &
 pid=$!
 report() {
   # render.mjs redraws "  chunk 03  42% · overall … · 7.1 fps · ETA …" with \r

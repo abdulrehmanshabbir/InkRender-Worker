@@ -1,8 +1,10 @@
 name: Render
 run-name: inkrender ${{ inputs.job }}
 
-# Started only by Inkrender. Renders a film-packer ZIP: one runner per chunk, then one runner joins
-# the chunks, adds the narration and saves the film to the Drive folder picked in Inkrender.
+# Started only by Inkrender. Renders a film-packer ZIP: Prepare checks the files, 20 Preflight runners
+# render a still of every shot and overlay (a minute or two, so a broken shot stops the run before any
+# rendering), then one runner per chunk renders it in self-healing segments, and one runner joins the
+# chunks, adds the narration and saves the film (Drive, or back to Inkrender through a draft release).
 on:
   workflow_dispatch:
     inputs:
@@ -48,9 +50,30 @@ jobs:
           retention-days: 2
           compression-level: 0
 
+  preflight:
+    name: Preflight ${{ matrix.part }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true      # one broken shot is enough to stop the whole render
+      matrix:
+        part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: package
+      - name: Check every shot and overlay (part ${{ matrix.part }} of 20)
+        run: bash scripts/preflight.sh "${{ matrix.part }}" 20
+
   chunk:
     name: Chunk ${{ matrix.chunk }}
-    needs: prepare
+    needs: [prepare, preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 300
     strategy:
