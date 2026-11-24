@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
-# Prepare: fetch the render ZIP from Inkrender once, prove every file's SHA-256, store it encrypted.
+# Prepare: take the render ZIP from the job's draft release (Inkrender put it there straight after the
+# upload), prove every file's SHA-256, then store it encrypted for the chunk runners.
 source "$(dirname "$0")/lib.sh"
 load_key
 progress '{"stage":"preparing"}'
 
 echo "::group::Download the render package"
-api GET /package -o "$RUNNER_TEMP/package.zip"
+ASSET=$(jq -r '.packageAsset // empty' <<< "$KEYJSON")
+if [ -n "$ASSET" ]; then
+  gh_download_asset "$ASSET" "$RUNNER_TEMP/package.zip"   # from GitHub itself: seconds
+else
+  api GET /package -o "$RUNNER_TEMP/package.zip"           # fallback: straight from Inkrender
+fi
 ls -l "$RUNNER_TEMP/package.zip"
 echo "::endgroup::"
 

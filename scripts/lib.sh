@@ -26,10 +26,26 @@ progress() {
 
 # The per-render key that encrypts everything this run stores as an artifact (the repo is public).
 load_key() {
-  KEY=$(api GET /key | jq -r .key)
+  KEYJSON=$(api GET /key)
+  KEY=$(jq -r .key <<< "$KEYJSON")
   [ -n "$KEY" ] && [ "$KEY" != null ] || { echo "::error::Inkrender did not hand out the render key"; exit 1; }
   echo "::add-mask::$KEY"
-  export KEY
+  export KEY KEYJSON
+}
+
+# Bulk data travels through the job's draft release on this repo (GitHub's own network), never
+# through Inkrender's home connection. GH_TOKEN is the run's token (contents: write).
+gh_download_asset() {  # asset id, output file
+  curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" \
+    -H "Accept: application/octet-stream" -o "$2" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$1"
+}
+gh_upload_asset() {  # release id, file, asset name — replaces a half-uploaded copy from an earlier try
+  local old
+  old=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$1/assets?per_page=100" \
+    | jq -r --arg n "$3" '.[] | select(.name == $n) | .id')
+  [ -z "$old" ] || curl -sSf -X DELETE -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$old"
+  curl -sSf --retry 3 --retry-delay 10 -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+    --data-binary @"$2" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$1/assets?name=$3" > /dev/null
 }
 encrypt() { openssl enc -aes-256-ctr -pbkdf2 -iter 200000 -salt -pass env:KEY -in "$1" -out "$2"; }
 decrypt() { openssl enc -d -aes-256-ctr -pbkdf2 -iter 200000 -pass env:KEY -in "$1" -out "$2"; }

@@ -21,12 +21,13 @@ on:
 
 permissions:
   id-token: write   # the OIDC token is how runners prove themselves to Inkrender
-  contents: read
+  contents: write   # read the render ZIP from / leave the film in the job's draft release
   actions: read
 
 env:
   API: ${{ inputs.api }}
   JOB: ${{ inputs.job }}
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
   prepare:

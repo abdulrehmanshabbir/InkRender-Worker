@@ -35,26 +35,24 @@ TARGET=$(api POST /video-upload -H 'Content-Type: application/json' -d "{\"bytes
 MODE=$(jq -r .mode <<< "$TARGET")
 
 if [ "$MODE" = server ]; then
-  # Save on the Inkrender server: 32 MB parts, each resumed from what the server reports it has.
-  PART=$((32 * 1024 * 1024))
-  sent=$(api GET /video | jq -r .received)
-  fails=0
-  while [ "$sent" -lt "$SIZE" ]; do
-    dd if="$FILM" of="$RUNNER_TEMP/part" bs=4M iflag=skip_bytes,count_bytes skip="$sent" count="$PART" status=none
-    if got=$(api PUT "/video?offset=$sent" -H 'Content-Type: application/octet-stream' --data-binary @"$RUNNER_TEMP/part" | jq -r .received); then
-      fails=0
-      sent=$got
-      echo "saved $((sent * 100 / SIZE))% to the server"
-    else
-      fails=$((fails + 1))
-      [ "$fails" -le 8 ] || { echo "::error::uploading the film to the server failed"; exit 1; }
-      sleep $((fails * 5))
-      sent=$(api GET /video | jq -r .received)
-    fi
+  # Leave the film in the job's draft release (parts under GitHub's 2 GB limit); Inkrender then
+  # downloads it directly from GitHub, at full speed, and checks size + md5 before keeping it.
+  RELEASE=$(jq -r '.release // empty' <<< "$KEYJSON")
+  [ -n "$RELEASE" ] || { echo "::error::Inkrender gave no release for the film"; exit 1; }
+  mkdir -p "$RUNNER_TEMP/film"
+  split -b 1900m -d -a 3 "$FILM" "$RUNNER_TEMP/film/film.part"
+  PARTS=()
+  for f in "$RUNNER_TEMP"/film/film.part*; do
+    name=$(basename "$f")
+    echo "sending $name ($(stat -c %s "$f") bytes) to GitHub"
+    gh_upload_asset "$RELEASE" "$f" "$name"
+    PARTS+=("$name")
+    rm -f "$f"
   done
-  rm -f "$RUNNER_TEMP/part"
-  api POST /video-done -H 'Content-Type: application/json' -d "{\"md5\":\"$MD5\",\"bytes\":$SIZE}" >/dev/null
-  echo "saved to the server"
+  PJSON=$(printf '%s\n' "${PARTS[@]}" | jq -R . | jq -sc .)
+  api POST /video-done -H 'Content-Type: application/json' \
+    -d "{\"md5\":\"$MD5\",\"bytes\":$SIZE,\"parts\":$PJSON}" >/dev/null
+  echo "film handed to Inkrender via GitHub"
   exit 0
 fi
 
