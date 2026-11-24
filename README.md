@@ -1,26 +1,37 @@
 # InkRender-Worker
 
-GitHub Actions render worker for **Inkrender**. Not meant to be used directly — the Inkrender backend triggers runs here via `workflow_dispatch`.
+The GitHub Actions render farm behind **Inkrender**. It is started only by Inkrender (`workflow_dispatch`).
 
-## How it works
+## What a run does
 
-1. Inkrender backend (on the InkStudio server) uploads a job manifest + pulls asset URLs from the user's Drive
-2. Backend calls `POST /repos/.../actions/workflows/render.yml/dispatches` with:
-   - `composition_id` (e.g. `Russia-Full`)
-   - `total_frames` (e.g. `131707`)
-   - `chunk_size` (default `900`)
-   - `assets_url` (pre-signed Drive URL for the project tarball)
-   - `callback_url` (Inkrender backend endpoint for progress)
-3. Workflow fans out across 20 parallel runners using a matrix
-4. Each runner downloads the tarball, renders its frame range, uploads chunk as artifact
-5. Final concat job stitches with `ffmpeg -c copy`, uploads the final MP4 as artifact
-6. Backend polls run status, pulls final MP4, uploads to user's picked Drive folder
+1. **Prepare**: downloads the film-packer render ZIP from Inkrender once and checks the SHA-256 of every
+   file and the chunk plan (`render.mjs check --quick`). It then stores the ZIP as an encrypted artifact.
+2. **Chunk NN** (one runner per chunk, 20 at a time): renders its chunk with the package's own
+   `render.mjs`. Every chunk is verified: frame count, resolution, codec, and every frame decoded.
+   Progress is reported to Inkrender, and the result is stored as an encrypted artifact.
+3. **Join and save**: re-verifies all chunks and joins them without re-encoding. It then adds the
+   narration, verifies the film, and uploads it straight into the Drive folder picked in Inkrender
+   (resumable upload).
+
+If a chunk fails, Inkrender's **Retry** re-runs only the failed jobs. The finished chunks are reused.
+
+## Security
+
+- **No secrets in this repo.** Runners request a GitHub OIDC token (`id-token: write`). Inkrender
+  checks its signature, and that it was issued to this repo's `render.yml` on `main` for the run that
+  belongs to the render.
+- **Encrypted artifacts.** The repo is public, which gives unlimited Actions minutes. Every artifact is
+  AES-256 encrypted with a per-render key that only the run's own runners can get from Inkrender. The
+  key and the Drive upload URL are masked in the logs.
+- **Clean-up.** Inkrender deletes the whole run (logs and artifacts) as soon as the film is saved.
+  Artifacts expire after 2 days anyway.
+- **Drive access.** The upload URL covers one new file in the picked folder. Inkrender revokes its
+  Drive access when the render ends.
 
 ## Files
 
-- `.github/workflows/render.yml` — matrix render workflow (dispatch-only, no push triggers)
-- `package.json` / `tsconfig.json` / `remotion.config.ts` — minimal Remotion scaffold
-
-## Why is this repo public?
-
-Public repos get unlimited GitHub Actions minutes on the free plan. No user data ever lives here — assets flow in as short-lived signed URLs from the user's own Google Drive, chunks live as temporary artifacts (auto-expire in 1 day), nothing persists.
+| File | Purpose |
+|---|---|
+| `.github/workflows/render.yml` | prepare → chunk matrix → join and save |
+| `scripts/lib.sh` | OIDC calls to Inkrender, progress, encryption |
+| `scripts/prepare.sh`, `chunk.sh`, `finish.sh` | the three jobs |

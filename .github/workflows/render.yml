@@ -1,185 +1,102 @@
 name: Render
+run-name: inkrender ${{ inputs.job }}
 
+# Started only by Inkrender. Renders a film-packer ZIP: one runner per chunk, then one runner joins
+# the chunks, adds the narration and saves the film to the Drive folder picked in Inkrender.
 on:
   workflow_dispatch:
     inputs:
-      composition_id:
-        description: "Remotion composition id (e.g. Russia-Full)"
+      job:
+        description: Inkrender render id
         required: true
         type: string
-      total_frames:
-        description: "Total frames in the composition"
-        required: true
-        type: number
-      chunk_size:
-        description: "Frames per chunk"
-        required: false
-        type: number
-        default: 900
-      assets_url:
-        description: "Signed URL to tarball with components/ core/ film/ film/public/"
+      api:
+        description: Inkrender base URL
         required: true
         type: string
-      callback_url:
-        description: "Inkrender backend endpoint for progress pings (optional)"
-        required: false
+      chunks:
+        description: 'Chunk ids as JSON, e.g. ["01","02"]'
+        required: true
         type: string
-        default: ""
-      video_bitrate:
-        description: "Target video bitrate (e.g. 650K)"
-        required: false
-        type: string
-        default: "650K"
+
+permissions:
+  id-token: write   # the OIDC token is how runners prove themselves to Inkrender
+  contents: read
+  actions: read
+
+env:
+  API: ${{ inputs.api }}
+  JOB: ${{ inputs.job }}
 
 jobs:
-  plan:
-    name: Plan + cache project tarball
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-    outputs:
-      chunks: ${{ steps.chunks.outputs.chunks }}
-      chunk_size: ${{ steps.chunks.outputs.chunk_size }}
+    timeout-minutes: 30
     steps:
-      - name: Compute chunk list
-        id: chunks
-        run: |
-          TOTAL=${{ inputs.total_frames }}
-          SIZE=${{ inputs.chunk_size }}
-          NCHUNKS=$(( (TOTAL + SIZE - 1) / SIZE ))
-          CHUNKS=$(python3 -c "import json; print(json.dumps(list(range($NCHUNKS))))")
-          echo "chunks=$CHUNKS" >> $GITHUB_OUTPUT
-          echo "chunk_size=$SIZE" >> $GITHUB_OUTPUT
-          echo "planned $NCHUNKS chunks of $SIZE frames each"
-
-      - name: Pull project tarball from Inkrender (ONE time)
-        run: |
-          echo "Downloading from user's server..."
-          time curl -fL --retry 3 --retry-delay 5 -o assets.tar.gz "${{ inputs.assets_url }}"
-          ls -lh assets.tar.gz
-
-      - name: Cache tarball as artifact (zero-compression — GH-internal transfer)
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          name: project-tarball
-          path: assets.tar.gz
-          retention-days: 1
-          compression-level: 0  # already gzipped, don't double-compress
+          node-version: 22
+      - name: Fetch, check and seal the package
+        run: bash scripts/prepare.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: package/package.enc
+          retention-days: 2
+          compression-level: 0
 
-  render:
-    name: Render chunk ${{ matrix.chunk }}
-    needs: plan
+  chunk:
+    name: Chunk ${{ matrix.chunk }}
+    needs: prepare
     runs-on: ubuntu-latest
+    timeout-minutes: 300
     strategy:
       fail-fast: false
-      max-parallel: 20   # free plan concurrency cap
+      max-parallel: 20
       matrix:
-        chunk: ${{ fromJSON(needs.plan.outputs.chunks) }}
+        chunk: ${{ fromJSON(inputs.chunks) }}
     steps:
-      - name: Checkout worker scaffold
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-
-      - name: Pull cached tarball from GH (gigabit, seconds)
-        uses: actions/download-artifact@v4
+          node-version: 22
+      - uses: actions/download-artifact@v4
         with:
-          name: project-tarball
-
-      - name: Extract
-        run: |
-          time tar -xzf assets.tar.gz
-          ls -la | head -20
-
-      - name: Install project deps
-        run: |
-          if [ ! -f package.json ]; then echo "::error::project tarball missing package.json"; exit 1; fi
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --loglevel=error
-          else
-            npm install --no-audit --loglevel=error --no-package-lock
-          fi
-
-      - name: Bundle
-        run: |
-          mkdir -p .render-tmp build
-          export TMPDIR=$PWD/.render-tmp
-          npx remotion bundle film/index.ts --public-dir film/public --out-dir build
-
+          name: package
+          path: package
       - name: Render chunk ${{ matrix.chunk }}
-        run: |
-          export TMPDIR=$PWD/.render-tmp
-          CHUNK=${{ matrix.chunk }}
-          SIZE=${{ needs.plan.outputs.chunk_size }}
-          LAST=$(( ${{ inputs.total_frames }} - 1 ))
-          A=$(( CHUNK * SIZE ))
-          B=$(( A + SIZE - 1 ))
-          [ $B -gt $LAST ] && B=$LAST
-          mkdir -p chunks
-          OUT=$(printf "chunks/%04d.mp4" $CHUNK)
-          # Standard GH Linux runner = 4 vCPU; concurrency 4 saturates cores
-          npx remotion render build "${{ inputs.composition_id }}" "$OUT" \
-            --frames=$A-$B \
-            --codec h264 \
-            --video-bitrate "${{ inputs.video_bitrate }}" \
-            --audio-bitrate 128K \
-            --concurrency 4 \
-            --timeout 180000 \
-            --public-dir film/public
-
-      - name: Upload chunk artifact
-        uses: actions/upload-artifact@v4
+        run: bash scripts/chunk.sh "${{ matrix.chunk }}"
+      - uses: actions/upload-artifact@v4
         with:
           name: chunk-${{ matrix.chunk }}
-          path: chunks/*.mp4
-          retention-days: 1
+          path: result/chunk-${{ matrix.chunk }}.enc
+          retention-days: 2
+          compression-level: 0
 
-      - name: Ping progress (optional)
-        if: inputs.callback_url != ''
-        run: |
-          curl -s -X POST "${{ inputs.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"run_id\":\"${{ github.run_id }}\",\"chunk\":${{ matrix.chunk }},\"status\":\"done\"}" || true
-
-  concat:
-    name: Concat final MP4
-    needs: [plan, render]
+  finish:
+    name: Join and save
+    needs: chunk
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
-      - name: Download all chunks
-        uses: actions/download-artifact@v4
+      - name: Make room for a long film
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h "$GITHUB_WORKSPACE" | tail -n 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+          path: package
+      - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
-          path: chunks-raw
+          path: chunks
           merge-multiple: true
-
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Concat with -c copy
-        run: |
-          mkdir -p out chunks
-          # flatten into chunks/ with 4-digit names
-          find chunks-raw -name '*.mp4' | sort | while read f; do
-            name=$(basename $f)
-            cp "$f" "chunks/$name"
-          done
-          : > concat.txt
-          ls chunks/*.mp4 | sort | while read f; do echo "file '$PWD/$f'" >> concat.txt; done
-          ffmpeg -y -f concat -safe 0 -i concat.txt -c copy out/final.mp4
-          ls -lh out/final.mp4
-
-      - name: Upload final MP4
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-video
-          path: out/final.mp4
-          retention-days: 7
-
-      - name: Ping done (optional)
-        if: inputs.callback_url != ''
-        run: |
-          curl -s -X POST "${{ inputs.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"run_id\":\"${{ github.run_id }}\",\"status\":\"complete\"}" || true
+      - name: Join, verify and save to Drive
+        run: bash scripts/finish.sh
