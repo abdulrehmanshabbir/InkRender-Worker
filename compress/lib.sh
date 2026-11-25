@@ -16,8 +16,8 @@ upload() {  # file, asset name (replaces a half-uploaded copy from an earlier tr
     --data-binary @"$1" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE/assets?name=$2" > /dev/null
 }
 need_ffmpeg() {
-  if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libsvtav1; then
+  if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null; then
     sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
   fi
-  ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libsvtav1 || { echo "::error::ffmpeg has no SVT-AV1"; exit 1; }
+  ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null || { echo "::error::ffmpeg has no SVT-AV1"; exit 1; }
 }

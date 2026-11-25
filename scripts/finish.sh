@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Join and save: re-verify every chunk, join them without re-encoding, add the narration, verify the
-# film, then save it: straight into the user's Drive folder (resumable; Inkrender opens the upload), or
+# Join and save: check every AV1 chunk, join them without re-encoding, add the original narration,
+# verify the film, then save it: straight into the user's Drive folder (resumable; Inkrender opens the upload), or
 # onto the Inkrender server when Drive is switched off for this render.
 source "$(dirname "$0")/lib.sh"
 load_key
@@ -19,13 +19,30 @@ done
 ls -l out/chunks
 echo "::endgroup::"
 
-echo "::group::Install the pinned renderer"
-node render.mjs setup
+echo "::group::Install ffmpeg"
+need_ffmpeg
 echo "::endgroup::"
 
-node render.mjs verify
-node render.mjs stitch
-FILM="$PKG/out/$(jq -r .output manifest.json)"
+# Join the AV1 chunks without re-encoding and add the original narration (Opus, copied as it is).
+# Every chunk is checked first: present, unchanged since its runner verified it, exact frame count.
+OUTPUT=$(jq -r .output manifest.json)
+FILM="$PKG/out/$OUTPUT"
+: > "$RUNNER_TEMP/chunks.txt"
+for cid in $(jq -r '.chunks[].id' manifest.json); do
+  f="out/chunks/$cid.mp4"; ok="out/chunks/$cid.ok.json"
+  [ -f "$f" ] && [ -f "$ok" ] || { echo "::error::chunk $cid is missing"; exit 1; }
+  [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$(jq -r .sha256 "$ok")" ] || { echo "::error::chunk $cid changed after it was verified"; exit 1; }
+  want=$(jq -r --arg c "$cid" '.chunks[] | select(.id == $c) | .to - .from + 1' manifest.json)
+  got=$(ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=codec_name,nb_read_packets -of csv=p=0 "$f")
+  [ "$got" = "av1,$want" ] || { echo "::error::chunk $cid is $got, expected av1,$want"; exit 1; }
+  echo "file '$PKG/$f'" >> "$RUNNER_TEMP/chunks.txt"
+done
+ffmpeg -hide_banner -v error -y -f concat -safe 0 -i "$RUNNER_TEMP/chunks.txt" -i "$(jq -r .audio manifest.json)" \
+  -map 0:v -map 1:a -c copy -movflags +faststart "$FILM"
+FRAMES=$(ffprobe -v error -count_packets -select_streams v:0 -show_entries stream=nb_read_packets -of csv=p=0 "$FILM")
+[ "$FRAMES" = "$(jq -r .durationInFrames manifest.json)" ] || { echo "::error::the film has $FRAMES frames, expected $(jq -r .durationInFrames manifest.json)"; exit 1; }
+ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$FILM" | grep . > /dev/null || { echo "::error::the film has no narration"; exit 1; }
+ffprobe -v error -show_entries stream=codec_name,pix_fmt,width,height:format=duration,size,bit_rate -of compact "$FILM"
 SIZE=$(stat -c %s "$FILM")
 MD5=$(md5sum "$FILM" | cut -d' ' -f1)
 echo "film: $SIZE bytes, md5 $MD5"
@@ -40,9 +57,13 @@ if [ "$MODE" = server ]; then
   RELEASE=$(jq -r '.release // empty' <<< "$KEYJSON")
   [ -n "$RELEASE" ] || { echo "::error::Inkrender gave no release for the film"; exit 1; }
   mkdir -p "$RUNNER_TEMP/film"
-  split -b 1900m -d -a 3 "$FILM" "$RUNNER_TEMP/film/film.part"
+  if [ "$SIZE" -le $((1900 * 1024 * 1024)) ]; then
+    cp "$FILM" "$RUNNER_TEMP/film/$OUTPUT"            # one file: downloadable straight from GitHub
+  else
+    split -b 1900m -d -a 3 "$FILM" "$RUNNER_TEMP/film/film.part"
+  fi
   PARTS=()
-  for f in "$RUNNER_TEMP"/film/film.part*; do
+  for f in "$RUNNER_TEMP"/film/*; do
     name=$(basename "$f")
     echo "sending $name ($(stat -c %s "$f") bytes) to GitHub"
     gh_upload_asset "$RELEASE" "$f" "$name"

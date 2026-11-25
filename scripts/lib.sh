@@ -59,3 +59,11 @@ open_package() {
   rm -f "$RUNNER_TEMP/package.zip"
   cd "$GITHUB_WORKSPACE/pkg"/*/
 }
+
+# System ffmpeg with the SVT-AV1 encoder (chunks are encoded to AV1, the film is joined with it).
+need_ffmpeg() {
+  if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+  fi
+  ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null || { echo "::error::ffmpeg has no SVT-AV1 encoder"; exit 1; }
+}

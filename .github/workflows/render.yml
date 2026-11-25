@@ -30,6 +30,10 @@ env:
   API: ${{ inputs.api }}
   JOB: ${{ inputs.job }}
   GH_TOKEN: ${{ github.token }}
+  # The film is made directly in AV1 ("Excellent": ~500 MB for 80 minutes at 1080p): every chunk is
+  # encoded while it renders, so there is no separate compress step.
+  AV1_KBPS: "780"
+  AV1_PRESET: "7"
 
 jobs:
   prepare:

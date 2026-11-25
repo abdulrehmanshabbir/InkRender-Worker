@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Chunk: render one chunk with the package's own render.mjs (verified: frames, size, codec, every
-# frame decoded), reporting progress to Inkrender, then store it encrypted for the join job.
+# Chunk: render one chunk straight to AV1 (render-chunk.mjs: self-healing segments, each encoded to AV1
+# while the next renders; verified: codec, frames, size, every frame decoded), reporting progress to
+# Inkrender, then store it encrypted for the join job.
 source "$(dirname "$0")/lib.sh"
 CHUNK=$1
 load_key
 progress "{\"chunk\":\"$CHUNK\",\"state\":\"setup\",\"pct\":0}"
 open_package
 
-echo "::group::Install the pinned renderer"
+echo "::group::Install the pinned renderer and ffmpeg (SVT-AV1)"
 node render.mjs setup
+need_ffmpeg
 echo "::endgroup::"
 
 progress "{\"chunk\":\"$CHUNK\",\"state\":\"rendering\",\"pct\":0}"
-# Segmented, self-healing render: fresh browser per segment, 3-minute frame limit, per-segment retries
+# Segmented, self-healing render straight to AV1: fresh browser per segment, 3-minute frame limit,
+# per-segment retries, each segment encoded to AV1 while the next one renders
 node "$GITHUB_WORKSPACE/scripts/render-chunk.mjs" "$PWD" "$CHUNK" --concurrency "${CONCURRENCY:-4}" > render.log 2>&1 &
 pid=$!
 report() {
