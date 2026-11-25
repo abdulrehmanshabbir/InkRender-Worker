@@ -39,13 +39,17 @@ gh_download_asset() {  # asset id, output file
   curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -H "Authorization: Bearer $GH_TOKEN" \
     -H "Accept: application/octet-stream" -o "$2" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$1"
 }
+# A release-asset name GitHub keeps as it is (spaces and other characters become hyphens).
+safe_name() { printf '%s' "$1" | sed 's/[^A-Za-z0-9._-]/-/g'; }
+
 gh_upload_asset() {  # release id, file, asset name — replaces a half-uploaded copy from an earlier try
-  local old
+  local old enc
   old=$(curl -sSf -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$1/assets?per_page=100" \
     | jq -r --arg n "$3" '.[] | select(.name == $n) | .id')
   [ -z "$old" ] || curl -sSf -X DELETE -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$old"
+  enc=$(jq -rn --arg n "$3" '$n | @uri')
   curl -sSf --retry 3 --retry-delay 10 -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
-    --data-binary @"$2" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$1/assets?name=$3" > /dev/null
+    --data-binary @"$2" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$1/assets?name=$enc" > /dev/null
 }
 encrypt() { openssl enc -aes-256-ctr -pbkdf2 -iter 200000 -salt -pass env:KEY -in "$1" -out "$2"; }
 decrypt() { openssl enc -d -aes-256-ctr -pbkdf2 -iter 200000 -pass env:KEY -in "$1" -out "$2"; }

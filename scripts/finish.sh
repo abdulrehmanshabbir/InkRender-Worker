@@ -58,7 +58,7 @@ if [ "$MODE" = server ]; then
   [ -n "$RELEASE" ] || { echo "::error::Inkrender gave no release for the film"; exit 1; }
   mkdir -p "$RUNNER_TEMP/film"
   if [ "$SIZE" -le $((1900 * 1024 * 1024)) ]; then
-    cp "$FILM" "$RUNNER_TEMP/film/$OUTPUT"            # one file: downloadable straight from GitHub
+    cp "$FILM" "$RUNNER_TEMP/film/$(safe_name "$OUTPUT")"   # one file: downloadable straight from GitHub
   else
     split -b 1900m -d -a 3 "$FILM" "$RUNNER_TEMP/film/film.part"
   fi

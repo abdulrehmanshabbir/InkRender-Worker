@@ -20,6 +20,11 @@ on:
         description: 'Chunk ids as JSON, e.g. ["01","02"]'
         required: true
         type: string
+      from_run:
+        description: Join only, reusing the package and finished chunks of this earlier run (Retry after Join failed)
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write   # the OIDC token is how runners prove themselves to Inkrender
@@ -38,6 +43,7 @@ env:
 jobs:
   prepare:
     name: Prepare
+    if: inputs.from_run == ''
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -56,6 +62,7 @@ jobs:
 
   preflight:
     name: Preflight ${{ matrix.part }}
+    if: inputs.from_run == ''
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -77,6 +84,7 @@ jobs:
 
   chunk:
     name: Chunk ${{ matrix.chunk }}
+    if: inputs.from_run == ''
     needs: [prepare, preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 300
@@ -106,6 +114,7 @@ jobs:
   finish:
     name: Join and save
     needs: chunk
+    if: ${{ !cancelled() && (inputs.from_run != '' || needs.chunk.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -121,10 +130,14 @@ jobs:
         with:
           name: package
           path: package
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@v4
         with:
           pattern: chunk-*
           path: chunks
           merge-multiple: true
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Join, verify and save to Drive
         run: bash scripts/finish.sh

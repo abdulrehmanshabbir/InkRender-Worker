@@ -13,7 +13,7 @@ upload() {  # file, asset name (replaces a half-uploaded copy from an earlier tr
   local old; old=$(asset_id "$2")
   [ -z "$old" ] || curl -sSf -X DELETE "${auth[@]}" "$REPO_API/releases/assets/$old"
   curl -sSf --retry 3 --retry-delay 10 -X POST "${auth[@]}" -H "Content-Type: application/octet-stream" \
-    --data-binary @"$1" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE/assets?name=$2" > /dev/null
+    --data-binary @"$1" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE/assets?name=$(jq -rn --arg n "$2" '$n | @uri')" > /dev/null
 }
 need_ffmpeg() {
   if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null; then
