@@ -65,9 +65,31 @@ open_package() {
 }
 
 # System ffmpeg with the SVT-AV1 encoder (chunks are encoded to AV1, the film is joined with it).
+# Runner images carry third-party apt sources (Microsoft, …) that sometimes answer 403 or lose their signature; one
+# broken source makes `apt-get update` fail and ffmpeg never installs. Only Ubuntu's own archive is used, a failed
+# update never stops the install, it is retried, and if apt still has no SVT-AV1 a static build (BtbN, GPL) is used.
+has_svtav1() { ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libsvtav1; }
 need_ffmpeg() {
-  if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null; then
-    sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
+  if ! has_svtav1; then
+    sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete 2>/dev/null || true
+    for try in 1 2 3; do
+      sudo apt-get update -qq || true
+      sudo apt-get install -y -qq ffmpeg > /dev/null && break
+      echo "apt install of ffmpeg failed (try $try), retrying"; sleep $((try * 10))
+    done
   fi
-  ffmpeg -hide_banner -encoders 2>/dev/null | grep libsvtav1 > /dev/null || { echo "::error::ffmpeg has no SVT-AV1 encoder"; exit 1; }
+  if ! has_svtav1; then
+    echo "apt's ffmpeg has no SVT-AV1: using the static build"
+    local dir="$RUNNER_TEMP/ffmpeg-static"
+    mkdir -p "$dir"
+    for try in 1 2 3; do
+      curl -fsSL --retry 3 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
+        | tar -xJ -C "$dir" --strip-components=1 && break
+      sleep $((try * 10))
+    done
+    export PATH="$dir/bin:$PATH"
+    [ -n "${GITHUB_PATH:-}" ] && echo "$dir/bin" >> "$GITHUB_PATH"
+  fi
+  has_svtav1 || { echo "::error::ffmpeg has no SVT-AV1 encoder"; exit 1; }
+  echo "ffmpeg: $(command -v ffmpeg)"
 }
